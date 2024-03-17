@@ -1,0 +1,198 @@
+resource "azurerm_resource_group" "resource_group" {
+  name     = var.resource_group_name
+  location = var.location
+  tags     = var.tags
+}
+
+output "rg_name" {
+  value = azurerm_resource_group.resource_group.name
+}
+output "rg_id" {
+  value = azurerm_resource_group.resource_group.id
+}
+
+
+variable "resource_group_name" {
+  description = "(Required) The Name which should be used for this Resource Group. Changing this forces a new Resource Group to be created."
+  type        = string
+}
+variable "location" {
+  description = "(Required) The Azure Region where the Resource Group should exist. Changing this forces a new Resource Group to be created."
+  type        = string
+}
+variable "tags" {
+   description = "(Optional) A mapping of tags which should be assigned to the Resource Group."
+   type        = map(string)
+ }
+#  /*-------------------------------Resource Groups -------------------------*/
+ module "resourcegroup" {
+         for_each            = var.resource_groups
+         source              = "../../../../../Modules/ResourceGroup"
+         resource_group_name = each.value.name
+         location            = var.location
+         tags                = var.tags
+ }
+# /*-------------------------------Common Values-------------------------*/
+
+    location            = "norwayeast"
+    tags                = {
+       
+        "Terraform managed"     = "Yes"
+        "System"                = "Appkat-Nonprod-01"
+    }
+    
+
+/*-------------------------------Resource Groups -------------------------*/
+   resource_groups    = {
+    "nw_rg"          =   {"name" = "ng-rg-appkat-nw-ne-nonprod-01"}
+   }
+
+variable "location" {}
+variable "tags" {}
+variable "resource_groups"{}
+variable "vnets" {}
+variable "subnets" {}
+variable "vnet_appkat_ne_peer" {}
+
+
+
+
+
+pool:
+  name: Azure Pipelines
+  vmImage: 'windows-latest'
+variables:
+  - group: ngsky-ids
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    include:
+    - NGSky/NorwayEast/LandingZone/Corp/Appkat-Nonprod-01
+
+
+# Stages  
+stages:
+  # PlanStage
+  - stage: Plan
+    displayName: 'Plan changes'
+    jobs:
+    - job: plan
+      displayName: Terraform Plan
+      steps:
+      #Install terraform
+      - task: TerraformInstaller@0
+        inputs:
+          terraformVersion: 'latest'
+        displayName: Install Terraform
+        
+      # Initiate the working directory      
+      - task: TerraformTaskV2@2
+        inputs:
+          provider: 'azurerm'
+          command: 'init'
+          workingDirectory: "NGSky/NorwayEast/LandingZone/Corp/Appkat-Nonprod-01" #replace
+          commandOptions: '-backend-config="access_key=$(tfstatetoken)"'
+          backendServiceArm: 'ng-sc-appkat-nonprod'
+          backendAzureRmResourceGroupName: 'ng-rg-terraform-ne-shared-01'
+          backendAzureRmStorageAccountName: 'ngsttfstateneshared01'
+          backendAzureRmContainerName: 'ng-ngskytfstate-shared-01'
+          backendAzureRmKey: 'ngskyappkatnonprodne.tfstate' #replace
+        displayName: Terraform Init
+
+      - task: TerraformTaskV2@2
+        displayName: Terraform Plan
+        inputs:
+          provider: 'azurerm'
+          command: 'plan'
+          workingDirectory: 'NGSky/NorwayEast/LandingZone/Corp/Appkat-Nonprod-01'
+          commandOptions: '-var-file="env.tfvars"'
+          environmentServiceNameAzureRM: 'ng-sc-appkat-nonprod'
+        env:
+          # TF_VAR_MANAGEMENT_SUB : '$(SUB-ID-MANAGEMENT)'
+            TF_VAR_CONNECTIVITY_ID : '$(SUB-ID-CONNECTIVITY)'
+          # TF_VAR_SECURITY_SUB : '$(SUB-ID-SECURITY)'
+
+
+
+      - task: CopyFiles@2
+        displayName: 'Copy Files to: $(build.artifactstagingdirectory)'
+        inputs:
+          Contents: |
+            **NGSky\NorwayEast\LandingZone\Corp\Appkat-Nonprod-01\**
+            **\Modules\**         
+          TargetFolder: '$(build.artifactstagingdirectory)'
+          CleanTargetFolder: true
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Artifact'   
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+          ArtifactName: '$(Build.BuildID)-Core-tfplan' 
+    
+  - stage: Apply
+    displayName: 'Apply changes'
+    dependsOn: Plan
+    condition: succeeded('Plan')
+    jobs:
+      - deployment: apply
+        displayName: Terraform Apply
+        environment: ngsky
+        strategy:
+          runOnce:
+            deploy:  
+              steps: 
+                - task: TerraformInstaller@0
+                  displayName: 'Install Terraform'
+                  inputs:
+                    terraformVersion: 'latest'
+                - task: DownloadBuildArtifacts@0
+                  displayName: 'Download Build Artifacts'
+                  inputs:
+                    buildType: 'current'
+                    downloadType: 'single'
+                    artifactName: '$(Build.BuildID)-Core-tfplan'
+                    downloadPath: '$(System.ArtifactsDirectory)'    
+                - task: TerraformTaskV2@2
+                  displayName: 'Initialize Terraform Working Directory'
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'init'
+                    workingDirectory: "$(System.ArtifactsDirectory)/$(Build.BuildID)-Core-tfplan/NGSky/NorwayEast/LandingZone/Corp/Appkat-Nonprod-01" #replace
+                    commandOptions: '-backend-config="access_key=$(tfstatetoken)"'
+                    backendServiceArm: 'ng-sc-appkat-nonprod'
+                    backendAzureRmResourceGroupName: 'ng-rg-terraform-ne-shared-01'
+                    backendAzureRmStorageAccountName: 'ngsttfstateneshared01'
+                    backendAzureRmContainerName: 'ng-ngskytfstate-shared-01'
+                    backendAzureRmKey: 'ngskyappkatnonprodne.tfstate' #replace
+                - task: TerraformTaskV2@2
+                  displayName: 'Validate Terraform Configuration'
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'validate'
+                    workingDirectory: '$(System.ArtifactsDirectory)/$(Build.BuildID)-Core-tfplan/NGSky/NorwayEast/LandingZone/Corp/Appkat-Nonprod-01'
+                    #commandOptions: ''
+                - task: TerraformTaskV2@2
+                  displayName: 'Apply Terraform Plan'
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'apply'
+                    environmentServiceNameAzureRM: 'ng-sc-appkat-nonprod' 
+                    workingDirectory: '$(System.ArtifactsDirectory)/$(Build.BuildID)-Core-tfplan/NGSky/NorwayEast/LandingZone/Corp/Appkat-Nonprod-01' 
+                    commandOptions: '-var-file="env.tfvars" -auto-approve'
+                  env:
+                    # TF_VAR_MANAGEMENT_SUB : '$(SUB-ID-MANAGEMENT)'
+                      TF_VAR_CONNECTIVITY_ID : '$(SUB-ID-CONNECTIVITY)'
+                    # TF_VAR_SECURITY_SUB : '$(SUB-ID-SECURITY)'
+      
+          
+
+
+
+
+
+
+
+
+
+
